@@ -1,9 +1,8 @@
-import usb.core
-import usb.util
-import time
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
+import usb.core
+import usb.util
+import cv2
 
 class LidarNotFound(Exception):
     pass
@@ -22,23 +21,9 @@ class Lidar:
     def connected(self):
         return self.device is not None
 
-    def set_measurement_range(self, start_angle, stop_angle):
-        # Convert angles to hex format required by your LiDAR
-        start_angle_hex = f"{int(start_angle * 10000):08X}"
-        stop_angle_hex = f"{int(stop_angle * 10000):08X}"
-        self.send(f"sMN mLMPsetscancfg +2500 +5000 {start_angle_hex} {stop_angle_hex}")
-        return self.read()
-
-    def set_scan_frequency(self, frequency):
-        # Assuming frequency is in Hz and needs to be converted to an appropriate format
-        frequency_hex = f"{int(frequency * 100):04X}"
-        self.send(f"sMN mLMPsetscancfg {frequency_hex}")
-        return self.read()
-    
     def send(self, cmd):
         if self.connected():
             try:
-                print(f"Sending command: {cmd}")
                 self.device.write(2 | usb.ENDPOINT_OUT, f"\x02{cmd}\x03\0", 0)  # Endpoint OUT
             except usb.core.USBError as e:
                 print(f"Error sending command to LiDAR: {e}")
@@ -53,37 +38,15 @@ class Lidar:
                 arr = self.check_error(arr)
                 return arr
             except usb.core.USBError as e:
-                print(f"Error reading from LiDAR: {e}")
+                pass
                 return None
         else:
             raise LidarNotFound("LiDAR Device is not connected!")
 
     def check_error(self, response):
         if "FA" in response:
-            print("Error response received:", response)
+            pass
         return response
-
-    def firmware_version(self):
-        self.send("sRN FirmwareVersion")
-        return self.read()
-
-    def device_identification(self):
-        self.send("sRI 0")
-        return self.read()
-
-    def set_access_mode(self, user="03", password="F4724744"):
-        self.send(f'sMN SetAccessMode {user} {password}')
-        return self.read()
-
-    
-    
-    def start_measurement(self):
-        self.send("sMN LMCstartmeas")
-        return self.read()
-
-    def run(self):
-        self.send('sMN Run')
-        return self.read()
 
     def scan_data(self, data):
         self.send(data)
@@ -91,28 +54,24 @@ class Lidar:
 
 def parse_telegram(telegram):
     tokens = telegram.split(' ')
-    
-    # Ensure that there are enough tokens
-    if len(tokens) <= (18 + 8):  # Minimum valid length
+    if len(tokens) <= (18 + 8):  
         raise ValueError("Insufficient data tokens")
     
-    # Extract header and validate
     header = tokens[:18]
     if header[0] != 'sRA':
         raise ValueError("Invalid command type")
     if header[1] != 'E9':
         raise ValueError("Invalid command")
     
-    # Extract and validate data sections
     sections = tokens[18:]
     try:
-        if int(sections[0], 16) != 0:  # No encoder data
+        if int(sections[0], 16) != 0:  
             raise ValueError("Unexpected encoder data")
-        if int(sections[1], 16) != 1:  # Exactly 1 16-bit channel block
+        if int(sections[1], 16) != 1:  
             raise ValueError("Unexpected channel block count")
-        if sections[2] != 'DIST1':  # Distance data expected
+        if sections[2] != 'DIST1':  
             raise ValueError("Unexpected data type")
-        if sections[3] not in ['3F800000', '40000000']:  # Check scale factor
+        if sections[3] not in ['3F800000', '40000000']:  
             raise ValueError("Invalid scale factor")
         
         scale_factor = 1 if sections[3] == '3F800000' else 2
@@ -123,7 +82,6 @@ def parse_telegram(telegram):
         angle_step = int(sections[6], 16) / 10000.0
         value_count = int(sections[7], 16)
         
-        # Extract distance values and compute angles
         values = list(map(lambda x: int(x, 16) * scale_factor, sections[8:8 + value_count]))
         angles = [start_angle + angle_step * n for n in range(value_count)]
         
@@ -132,65 +90,116 @@ def parse_telegram(telegram):
     except ValueError as e:
         raise ValueError(f"Parsing error: {e}")
 
-def check_obstacles(values, angles):
-    """Check for obstacles within 70 cm in the right, front, and left directions."""
-    threshold = 700  # 70 cm in mm
+def rotate_points(values, angles, rotation_angle_deg):
+    rotation_angle_rad = np.deg2rad(rotation_angle_deg)
 
-    right_range = (0, 45)
-    front_range = (45, 135)
-    left_range = (135, 180)
+    x_coords = np.array(values) * np.cos(np.deg2rad(angles))
+    y_coords = np.array(values) * np.sin(np.deg2rad(angles))
 
-    right_close = any(value < threshold for angle, value in zip(angles, values) if right_range[0] <= angle < right_range[1])
-    front_close = any(value < threshold for angle, value in zip(angles, values) if front_range[0] <= angle < front_range[1])
-    left_close = any(value < threshold for angle, value in zip(angles, values) if left_range[0] <= angle < left_range[1])
+    x_rotated = x_coords * np.cos(rotation_angle_rad) - y_coords * np.sin(rotation_angle_rad)
+    y_rotated = x_coords * np.sin(rotation_angle_rad) + y_coords * np.cos(rotation_angle_rad)
 
-    if right_close:
-        print("Obstacle detected on the RIGHT")
-    if front_close:
-        print("Obstacle detected in FRONT")
-    if left_close:
-        print("Obstacle detected on the LEFT")
+    values_rotated = np.sqrt(x_rotated**2 + y_rotated**2)
+    angles_rotated = np.rad2deg(np.arctan2(y_rotated, x_rotated))
+
+    return values_rotated, angles_rotated
+
+def get_colors(angles_rotated):
+    colors = []
+    for angle in angles_rotated:
+        if 0 <= angle < 45:
+            colors.append('green')
+        elif 45 <= angle < 90:
+            colors.append('red')
+        elif 90 <= angle < 135:
+            colors.append('brown')
+        elif 135 <= angle < 180:
+            colors.append('blue')
+        else:
+            colors.append('white')  # Default color for out-of-range angles
+    return colors
+
+def check_roi(x, y):
+    # Define the boundaries for 4 ROIs (rectangular)
+    roi_1 = (160, 160, 320, 320)  # Example for one ROI
+    roi_2 = (320, 160, 480, 320)
+    roi_3 = (160, 320, 320, 480)
+    roi_4 = (320, 320, 480, 480)
+    
+    if roi_1[0] <= x <= roi_1[2] and roi_1[1] <= y <= roi_1[3]:
+        return 'ROI 1'
+    elif roi_2[0] <= x <= roi_2[2] and roi_2[1] <= y <= roi_2[3]:
+        return 'ROI 2'
+    elif roi_3[0] <= x <= roi_3[2] and roi_3[1] <= y <= roi_3[3]:
+        return 'ROI 3'
+    elif roi_4[0] <= x <= roi_4[2] and roi_4[1] <= y <= roi_4[3]:
+        return 'ROI 4'
+    return None
 
 def main():
     lidar = Lidar()
-    
-    try:
-        # Set Access Mode, Run the device, and start measurement
-        print("Run:", lidar.run())
-        time.sleep(0.1)
-        
-        # Setup plot
-        fig, ax = plt.subplots(subplot_kw={'projection': 'polar'}, figsize=(8, 8))
-        ax.set_title('LiDAR Scan Data')
-        
-        
-        
-        # Initialize scatter plot
-        scatter = ax.scatter([], [], c='b', marker='o', s=15, alpha=0.7, edgecolors='none')
-        ax.set_rmax(7000)  # Set maximum radial distance, adjust as needed
-        ax.set_rticks([])  # Remove radial ticks
-        ax.set_yticklabels([])  # Remove radial labels
-        ax.set_xticks(np.linspace(0, 2 * np.pi, 8, endpoint=False))  # Add angular ticks
-        ax.set_thetamax(225)  # Optionally limit the maximum theta (angle) displayed
-        ax.set_thetamin(-45)  # Optionally limit the minimum theta (angle) displayed
-        ax.set_theta_zero_location('E')  # Default, 'N' for North (0 degrees at the top)
-        # Other options: 'E' (East), 'S' (South), 'W' (West)
+    result = [0, 0, 0, 0]  # Initialize the result array
 
+    try:
+        # Setup plot
+        img = np.zeros((640, 640, 3), dtype=np.uint8)
+        
         while True:
-            # Get scan data
             data = lidar.scan_data("sRI E9")
             values, angles = parse_telegram(data)
-            adjusted_angles = [(angle - 15) % 360 for angle in angles]
             
-            # Update scatter plot data
+            rotation_angle = -15  # Define the rotation angle in degrees
+            values_rotated, angles_rotated = rotate_points(values, angles, rotation_angle)
             
-            # Check for obstacles
-            check_obstacles(adjusted_angles, angles)
+            colors = get_colors(angles_rotated)
             
-            # Update plot
-            scatter.set_offsets(np.column_stack((np.deg2rad(adjusted_angles), values)))
-            plt.pause(0.1)  # Smooth update interval
+            img.fill(0)  # Clear the image
+            result = [0, 0, 0, 0]  # Reset the result array
             
+            # Draw the horizontal line at y = 530
+            y_line = 130
+            cv2.line(img, (0, y_line), (img.shape[1], y_line), (255, 255, 255), 2)
+            
+            # Define the section boundaries relative to y = 530
+            section_boundaries = [0, img.shape[0] // 4, img.shape[0] // 2, 3 * img.shape[0] // 4]
+            
+            for value, angle, color in zip(values_rotated, angles_rotated, colors):
+                angle_rad = np.deg2rad(angle)
+                x = int(320 + value * np.cos(angle_rad) * 0.1)  # Scaling down the distances
+                y = int(320 - value * np.sin(angle_rad) * 0.1)
+                
+                # Check if the point is within the image bounds
+                if 0 <= x < img.shape[1] and 0 <= y < img.shape[0]:
+                    if y > y_line:
+                        # Update the result array based on section
+                        section_index = (x * 4) // img.shape[1]
+                        if 0 <= section_index < 4:
+                            result[section_index] = 1  # Mark the section as occupied
+
+                    # Draw the point with the respective color
+                    if color == 'green':
+                        cv2.circle(img, (x, y), 2, (0, 255, 0), -1)
+                    elif color == 'red':
+                        cv2.circle(img, (x, y), 2, (0, 0, 255), -1)
+                    elif color == 'brown':
+                        cv2.circle(img, (x, y), 2, (42, 42, 165), -1)  # Brown color in BGR
+                    elif color == 'blue':
+                        cv2.circle(img, (x, y), 2, (255, 0, 0), -1)
+                    else:
+                        cv2.circle(img, (x, y), 2, (0, 0, 0), -1)
+            
+            # Rotate the image for display
+            img_r = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
+            cv2.imshow('LiDAR Scan', img_r)
+            
+            # Display the detection results
+            print("Detection Results:", result)
+
+            if cv2.waitKey(10) & 0xFF == ord('q'):
+                break
+
+        cv2.destroyAllWindows()
+
     except LidarNotFound as e:
         print(e)
     except Exception as e:
