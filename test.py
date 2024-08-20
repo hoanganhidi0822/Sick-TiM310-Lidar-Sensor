@@ -143,6 +143,7 @@ def main():
     try:
         # Setup plot
         img = np.zeros((640, 640, 3), dtype=np.uint8)
+        i = 0
         
         while True:
             data = lidar.scan_data("sRI E9")
@@ -191,7 +192,8 @@ def main():
             # Rotate the image for display
             img_r = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
             cv2.imshow('LiDAR Scan', img_r)
-            
+            cv2.imwrite(f"./data1/{i}.png", img_r)
+            i = i + 1
             # Display the detection results
             print("Detection Results:", result)
 

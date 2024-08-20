@@ -194,6 +194,8 @@ def main():
         ax.set_thetamin(-90)  # Optionally limit the minimum theta (angle) displayed
         ax.set_theta_zero_location('E')  # Default, 'N' for North (0 degrees at the top)
         # Other options: 'E' (East), 'S' (South), 'W' (West)
+        
+        i = 0
 
         while True:
             # Get scan data
@@ -209,6 +211,11 @@ def main():
             print(obstacle_status)
             # Update plot
             scatter.set_offsets(np.column_stack((np.deg2rad(adjusted_angles), values)))
+            # mdata = np.column_stack((np.deg2rad(adjusted_angles), values))
+            # np.savetxt(f"./data/{i}.txt", mdata)
+            i = i + 1
+            # plt.imsave("./1.png", fig)
+            
             plt.pause(0.1)  # Smooth update interval
             
     except LidarNotFound as e:
